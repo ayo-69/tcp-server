@@ -43,6 +43,12 @@ public:
         }
     }
 
+    void broadcast(const std::string& msg) {
+        for (auto participant : participants_) {
+            participant->deliver(msg);
+        }
+    }
+
 private:
     std::set<chat_participant_ptr> participants_;
 };
@@ -99,9 +105,12 @@ private:
                     room_.deliver(msg_to_broadcast, shared_from_this());
                     do_read();
                 } else {
-                    std::string leave_msg = "Client " + client_endpoint_str_ + " has left the chat.\n";
-                    std::cout << leave_msg;
-                    room_.deliver(leave_msg, shared_from_this());
+                    // Don't broadcast leave message if socket is closed due to server shutdown
+                    if (ec != boost::asio::error::operation_aborted) {
+                        std::string leave_msg = "Client " + client_endpoint_str_ + " has left the chat.\n";
+                        std::cout << leave_msg;
+                        room_.deliver(leave_msg, shared_from_this());
+                    }
                     room_.leave(shared_from_this());
                 }
             });
@@ -118,10 +127,9 @@ private:
                         do_write();
                     }
                 } else {
-                    std::string leave_msg = "Client " + client_endpoint_str_ + " has left the chat.\n";
-                    std::cout << leave_msg;
-                    room_.deliver(leave_msg, shared_from_this());
-                    room_.leave(shared_from_this());
+                     if (ec != boost::asio::error::operation_aborted) {
+                        room_.leave(shared_from_this());
+                     }
                 }
             });
     }
@@ -141,6 +149,11 @@ public:
         do_accept();
     }
 
+    void stop() {
+        acceptor_.close();
+        room_.broadcast("Server is shutting down. Goodbye!\n");
+    }
+
 private:
     void do_accept() {
         acceptor_.async_accept(
@@ -148,7 +161,10 @@ private:
                 if (!ec) {
                     std::make_shared<chat_session>(std::move(socket), room_)->start();
                 }
-                do_accept();
+                // If the operation was not aborted, continue accepting
+                if (ec != boost::asio::error::operation_aborted) {
+                    do_accept();
+                }
             });
     }
 
@@ -173,6 +189,15 @@ int main(int argc, char* argv[]) {
         tcp::endpoint endpoint(tcp::v4(), port);
         
         chat_server server(io_context, endpoint);
+
+        boost::asio::signal_set signals(io_context, SIGINT, SIGTERM);
+        signals.async_wait(
+            [&](const boost::system::error_code& /*error*/, int /*signal_number*/) {
+                std::cout << "\nShutdown signal received." << std::endl;
+                server.stop();
+                io_context.stop();
+            });
+
 
         std::cout << "Server is listening on port " << port << "...\n";
         
